@@ -1,4 +1,5 @@
-import { createDirectus, rest, readItems, readItem, authentication } from '@directus/sdk'
+import { createDirectus, rest, readItems, readItem, authentication, AuthenticationData, RestClient, AuthenticationClient } from '@directus/sdk'
+import 'isomorphic-fetch'
 
 // Directus schema types
 export interface User {
@@ -79,82 +80,154 @@ export interface LiveStream {
   viewers_count: number
 }
 
+// Define the schema for our Directus instance
+interface Schema {
+  articles: Article[]
+  categories: Category[]
+  tags: Tag[]
+  courses: Course[]
+  live_streams: LiveStream[]
+  users: User[]
+}
+
 // Directus client configuration
 const directusUrl = process.env.NEXT_PUBLIC_DIRECTUS_URL || 'http://localhost:8055'
 
-// Create Directus client
-export const directus = createDirectus(directusUrl).with(rest()).with(authentication())
+// Create a type for our Directus client with the schema
+type DirectusClient = RestClient<Schema> & AuthenticationClient<Schema>
+
+// Create Directus client with authentication and REST support
+const createDirectusClient = (): DirectusClient => {
+  return createDirectus<Schema>(directusUrl)
+    .with(rest())
+    .with(authentication('json'))
+}
+
+// Export the client instance
+export const directus = createDirectusClient()
+
+// Helper function to handle authentication
+export const authenticate = async (email: string, password: string): Promise<AuthenticationData | null> => {
+  try {
+    const response = await directus.login({
+      email,
+      password,
+    })
+    return response
+  } catch (error) {
+    console.error('Authentication failed:', error)
+    return null
+  }
+}
+
+// Helper function to check authentication status
+export const isAuthenticated = async (): Promise<boolean> => {
+  try {
+    await directus.getToken()
+    return true
+  } catch (error) {
+    return false
+  }
+}
+
+// Helper function to logout
+export const logout = async (): Promise<void> => {
+  try {
+    await directus.logout()
+  } catch (error) {
+    console.error('Logout failed:', error)
+  }
+}
 
 // API functions
 export class DirectusAPI {
   // Articles
-  static async getArticles(limit = 20, offset = 0, category?: string) {
+  static async getArticles(limit = 20, offset = 0, category?: string): Promise<Article[]> {
     try {
-      const query: any = {
-        limit,
-        offset,
-        sort: ['-date_published'],
-        filter: {
-          status: { _eq: 'published' }
-        },
-        fields: [
-          'id', 'title', 'slug', 'excerpt', 'featured_image',
-          'date_published', 'views', 'likes', 'comments_count',
-          'user_created.id', 'user_created.first_name', 'user_created.last_name', 'user_created.avatar',
-          'category.id', 'category.name', 'category.slug',
-          'tags.id', 'tags.name', 'tags.slug'
-        ]
+      const filter: any = {
+        status: { _eq: 'published' as const }
       }
 
       if (category) {
-        query.filter.category = { slug: { _eq: category } }
+        filter['category'] = { slug: { _eq: category } }
       }
 
-      return await directus.request(readItems('articles', query))
+      const query = {
+        limit,
+        offset,
+        sort: ['-date_published' as const],
+        filter,
+        fields: [
+          'id', 'title', 'slug', 'excerpt', 'featured_image',
+          'date_published', 'views', 'likes', 'comments_count',
+          {
+            user_created: ['id', 'first_name', 'last_name', 'avatar']
+          },
+          {
+            category: ['id', 'name', 'slug']
+          },
+          {
+            tags: ['id', 'name', 'slug']
+          }
+        ]
+      } as const
+
+      const articles = await directus.request(readItems('articles', query))
+      return articles as unknown as Article[]
     } catch (error) {
       console.error('Error fetching articles:', error)
       return []
     }
   }
 
-  static async getArticle(slug: string) {
+  static async getArticle(slug: string): Promise<Article | null> {
     try {
       const articles = await directus.request(
         readItems('articles', {
           filter: {
             slug: { _eq: slug },
-            status: { _eq: 'published' }
+            status: { _eq: 'published' as const }
           },
           fields: [
             '*',
-            'user_created.id', 'user_created.first_name', 'user_created.last_name', 'user_created.avatar',
-            'category.id', 'category.name', 'category.slug',
-            'tags.id', 'tags.name', 'tags.slug'
+            {
+              user_created: ['id', 'first_name', 'last_name', 'avatar']
+            },
+            {
+              category: ['id', 'name', 'slug']
+            },
+            {
+              tags: ['id', 'name', 'slug']
+            }
           ]
-        })
+        } as const)
       )
-      return articles[0] || null
+      return (articles[0] as unknown as Article) || null
     } catch (error) {
       console.error('Error fetching article:', error)
       return null
     }
   }
 
-  static async getFeaturedArticles(limit = 5) {
+  static async getFeaturedArticles(limit = 5): Promise<Article[]> {
     try {
-      return await directus.request(
+      const articles = await directus.request(
         readItems('articles', {
           limit,
           sort: ['-views'],
           filter: {
-            status: { _eq: 'published' }
+            status: { _eq: 'published' as const }
           },
           fields: [
             'id', 'title', 'slug', 'excerpt', 'featured_image',
-            'date_published', 'views', 'likes'
+            'date_published', 'views', 'likes',
+            {
+              user_created: ['id', 'first_name', 'last_name', 'avatar']
+            }
           ]
-        })
+        } as const)
       )
+      return articles as unknown as Article[]
     } catch (error) {
       console.error('Error fetching featured articles:', error)
       return []
@@ -162,9 +235,15 @@ export class DirectusAPI {
   }
 
   // Categories
-  static async getCategories() {
+  static async getCategories(): Promise<Category[]> {
     try {
-      return await directus.request(readItems('categories'))
+      const categories = await directus.request(
+        readItems('categories', {
+          sort: ['name'],
+          fields: ['id', 'name', 'slug', 'description', 'color']
+        } as const)
+      )
+      return categories as unknown as Category[]
     } catch (error) {
       console.error('Error fetching categories:', error)
       return []
@@ -172,42 +251,71 @@ export class DirectusAPI {
   }
 
   // Tags
-  static async getTags(limit = 20) {
+  static async getTags(limit = 20): Promise<Tag[]> {
     try {
-      return await directus.request(
+      const tags = await directus.request(
         readItems('tags', {
           limit,
-          sort: ['-articles_count'] // Assuming you have a count field
-        })
+          sort: ['name'],
+          fields: ['id', 'name', 'slug']
+        } as const)
       )
+      return tags as unknown as Tag[]
     } catch (error) {
       console.error('Error fetching tags:', error)
       return []
     }
   }
 
-  // Courses
-  static async getCourses(limit = 10, difficulty?: string) {
+  // Users
+  static async getUser(id: string): Promise<User | null> {
     try {
-      const query: any = {
-        limit,
-        sort: ['-students_count'],
-        filter: {
-          status: { _eq: 'published' }
-        },
-        fields: [
-          'id', 'title', 'description', 'slug', 'featured_image',
-          'difficulty_level', 'duration_hours', 'lessons_count',
-          'students_count', 'price', 'is_free',
-          'instructor.id', 'instructor.first_name', 'instructor.last_name', 'instructor.avatar'
-        ]
+      const user = await directus.request(
+        readItem('users', id, {
+          fields: [
+            'id', 'first_name', 'last_name', 'email', 'avatar',
+            'bio', 'website', 'github', 'twitter', 'linkedin',
+            'role', 'status', 'date_created', 'last_login'
+          ]
+        } as const)
+      )
+      return user as unknown as User
+    } catch (error) {
+      console.error('Error fetching user:', error)
+      return null
+    }
+  }
+
+  // Courses
+  static async getCourses(limit = 10, difficulty?: string): Promise<Course[]> {
+    try {
+      const filter: any = {
+        status: { _eq: 'published' as const }
       }
 
       if (difficulty) {
-        query.filter.difficulty_level = { _eq: difficulty }
+        filter.difficulty_level = { _eq: difficulty }
       }
 
-      return await directus.request(readItems('courses', query))
+      const query = {
+        limit,
+        sort: ['-students_count' as const],
+        filter,
+        fields: [
+          'id', 'title', 'description', 'slug', 'featured_image',
+          'difficulty_level', 'duration_hours', 'lessons_count',
+          'students_count', 'average_rating', 'is_free',
+          {
+            instructor: ['id', 'first_name', 'last_name', 'avatar']
+          },
+          {
+            category: ['id', 'name', 'slug']
+          }
+        ]
+      } as const
+
+      const courses = await directus.request(readItems('courses', query))
+      return courses as unknown as Course[]
     } catch (error) {
       console.error('Error fetching courses:', error)
       return []
@@ -215,23 +323,31 @@ export class DirectusAPI {
   }
 
   // Live Streams
-  static async getLiveStreams(limit = 10, status?: string) {
+  static async getLiveStreams(limit = 10, upcoming = true): Promise<LiveStream[]> {
     try {
-      const query: any = {
+      const now = new Date().toISOString()
+      
+      const query = {
         limit,
-        sort: ['-scheduled_at'],
+        sort: [upcoming ? 'scheduled_start' : '-scheduled_start' as const],
+        filter: {
+          status: { _eq: 'published' as const },
+          scheduled_start: { [upcoming ? '_gte' : '_lte']: now } as any
+        },
         fields: [
-          'id', 'title', 'description', 'scheduled_at', 'status',
-          'thumbnail', 'viewers_count',
-          'presenter.id', 'presenter.first_name', 'presenter.last_name', 'presenter.avatar'
+          'id', 'title', 'description', 'slug', 'thumbnail',
+          'scheduled_start', 'duration_minutes', 'viewers_count',
+          {
+            host: ['id', 'first_name', 'last_name', 'avatar']
+          },
+          {
+            category: ['id', 'name', 'slug']
+          }
         ]
-      }
+      } as const
 
-      if (status) {
-        query.filter = { status: { _eq: status } }
-      }
-
-      return await directus.request(readItems('live_streams', query))
+      const streams = await directus.request(readItems('live_streams', query))
+      return streams as unknown as LiveStream[]
     } catch (error) {
       console.error('Error fetching live streams:', error)
       return []
@@ -239,28 +355,46 @@ export class DirectusAPI {
   }
 
   // Search
-  static async searchContent(query: string, limit = 20) {
+  static async search(query: string, limit = 10) {
     try {
-      return await directus.request(
-        readItems('articles', {
-          limit,
-          filter: {
-            _or: [
-              { title: { _icontains: query } },
-              { excerpt: { _icontains: query } },
-              { content: { _icontains: query } }
-            ],
-            status: { _eq: 'published' }
-          },
-          fields: [
-            'id', 'title', 'slug', 'excerpt', 'featured_image',
-            'date_published', 'views', 'likes'
-          ]
-        })
-      )
+      const [articles, courses, liveStreams] = await Promise.all([
+        directus.request(
+          readItems('articles', {
+            limit,
+            search: query,
+            filter: { status: { _eq: 'published' as const } },
+            fields: ['id', 'title', 'slug', 'excerpt', 'date_published']
+          } as const)
+        ),
+        directus.request(
+          readItems('courses', {
+            limit,
+            search: query,
+            filter: { status: { _eq: 'published' as const } },
+            fields: ['id', 'title', 'slug', 'description', 'difficulty_level']
+          } as const)
+        ),
+        directus.request(
+          readItems('live_streams', {
+            limit,
+            search: query,
+            filter: { 
+              status: { _eq: 'published' as const },
+              scheduled_start: { _gte: new Date().toISOString() }
+            },
+            fields: ['id', 'title', 'slug', 'description', 'scheduled_start']
+          } as const)
+        )
+      ])
+
+      return {
+        articles: articles as unknown as Article[],
+        courses: courses as unknown as Course[],
+        liveStreams: liveStreams as unknown as LiveStream[]
+      }
     } catch (error) {
-      console.error('Error searching content:', error)
-      return []
+      console.error('Error searching:', error)
+      return { articles: [], courses: [], liveStreams: [] }
     }
   }
 
